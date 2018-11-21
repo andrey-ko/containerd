@@ -18,8 +18,11 @@ package mount
 
 import (
 	"encoding/json"
+	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/windows"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/Microsoft/hcsshim"
 	"github.com/pkg/errors"
@@ -59,6 +62,34 @@ func (m *Mount) Mount(target string) error {
 	if err = hcsshim.PrepareLayer(di, layerID, parentLayerPaths); err != nil {
 		return errors.Wrapf(err, "failed to prepare layer %s", m.Source)
 	}
+
+	vol, err := hcsshim.GetLayerMountPath(di, layerID);
+	if  err != nil {
+		return errors.Wrapf(err, "failed to prepare layer %s", m.Source)
+	}
+	if !strings.HasSuffix(vol, "\\") {
+		vol += "\\"
+	}
+	if !strings.HasSuffix(target, "\\") {
+		target += "\\"
+	}
+
+
+	targetUtf, err := syscall.UTF16PtrFromString(target)
+	if  err != nil {
+		return err
+	}
+
+	volUtf, err := syscall.UTF16PtrFromString(vol)
+	if  err != nil {
+		return err
+	}
+
+	err = windows.SetVolumeMountPoint(targetUtf, volUtf)
+	if err != nil {
+		return errors.Wrapf(err, "failed to mount layer %s", m.Source)
+	}
+
 	return nil
 }
 
@@ -80,6 +111,41 @@ func (m *Mount) GetParentPaths() ([]string, error) {
 	return parentLayerPaths, nil
 }
 
+func deleteAllMountPoints(vol string){
+	var err error
+	if !strings.HasSuffix(vol, "\\") {
+		vol += "\\"
+	}
+	volUtf, err := syscall.UTF16PtrFromString(vol)
+	if  err != nil {
+		return
+	}
+	var name [32<<10]uint16
+
+	h,err := windows.FindFirstVolumeMountPoint(volUtf, &name[0], uint32(len(name)))
+	if err != nil {
+		if err != syscall.ERROR_NO_MORE_FILES {
+			logrus.Warnf("failed to get next mount point: %s", err.Error())
+		}
+		return
+	}
+	defer windows.FindVolumeMountPointClose(h)
+
+	for{
+		err = windows.DeleteVolumeMountPoint(&name[0])
+		if err != nil {
+			logrus.Warnf("failed to delete mount point: %s", err.Error())
+		}
+		err = windows.FindNextVolumeMountPoint(h, &name[0], uint32(len(name)))
+		if err != nil {
+			if err != syscall.ERROR_NO_MORE_FILES {
+				logrus.Warnf("failed to get next mount point: %s", err.Error())
+			}
+			return
+		}
+	}
+}
+
 // Unmount the mount at the provided path
 func Unmount(mount string, flags int) error {
 	var (
@@ -87,13 +153,21 @@ func Unmount(mount string, flags int) error {
 		di            = hcsshim.DriverInfo{
 			HomeDir: home,
 		}
+		err error
 	)
 
-	if err := hcsshim.UnprepareLayer(di, layerID); err != nil {
-		return errors.Wrapf(err, "failed to unprepare layer %s", mount)
+	vol, err := hcsshim.GetLayerMountPath(di, layerID)
+	if err == nil {
+		deleteAllMountPoints(vol)
 	}
-	if err := hcsshim.DeactivateLayer(di, layerID); err != nil {
-		return errors.Wrapf(err, "failed to deactivate layer %s", mount)
+
+	if err = hcsshim.UnprepareLayer(di, layerID); err != nil {
+		logrus.Warnf("failed to unprepare layer %s: %s", mount, err.Error())
+		//return errors.Wrapf(err, "failed to unprepare layer %s", mount)
+	}
+	if err = hcsshim.DeactivateLayer(di, layerID); err != nil {
+		logrus.Warnf("failed to deactivate layer %s: %s", mount, err.Error())
+		//return errors.Wrapf(err, "failed to deactivate layer %s", mount)
 	}
 
 	return nil

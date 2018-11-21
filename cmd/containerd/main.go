@@ -18,6 +18,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/sirupsen/logrus"
 	"os"
 
 	"github.com/containerd/containerd/cmd/containerd/command"
@@ -30,6 +31,7 @@ func init() {
 
 func main() {
 	app := command.App()
+	logrus.SetLevel(logrus.DebugLevel)
 	if err := app.Run(os.Args); err != nil {
 		fmt.Fprintf(os.Stderr, "containerd: %s\n", err)
 		os.Exit(1)
